@@ -1,0 +1,12 @@
+services:
+  media-saver:
+    build: .
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    environment:
+      API_TOKEN: ${API_TOKEN}                # long random string, also pasted into the Shortcut
+      RCLONE_REMOTE: "gdrive:Social Saves"   # Drive folder; files go to <folder>/instagram|tiktok|x
+      COOKIES_FILE: /config/cookies.txt      # remove this line if you don't use cookies
+    volumes:
+      - ./config:/config                     # rclone.conf (+ cookies.txt)
