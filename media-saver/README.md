@@ -3,71 +3,84 @@
 Share a post from X, TikTok or Instagram on iOS, pick **Save to Drive**, and the video/photos land in a Google Drive folder.
 
 ```
-iOS Share Sheet ──► Shortcut ──POST link──► media-saver (yt-dlp / gallery-dl) ──rclone──► Google Drive
+iOS Share Sheet ─► Shortcut ─HTTPS─► Cloudflare Worker (checks token)
+                                        └─► Cloudflare Container (wakes on demand)
+                                              yt-dlp / gallery-dl ─► rclone ─► Google Drive
 ```
 
-Files are stored as `<RCLONE_REMOTE>/instagram`, `/tiktok` and `/x`. The default remote is `gdrive:Social Saves`.
+Files go to `Social Saves/instagram`, `/tiktok` and `/x`. Change the folder with `RCLONE_REMOTE` in `wrangler.jsonc`.
+
+The container only runs (and bills) while it's handling a download, plus 10 idle minutes. Cost per download is a fraction of a cent on a `basic` instance. Uploading to Drive counts as container egress. See [Containers pricing](https://developers.cloudflare.com/containers/platform/pricing/). Requires the Workers Paid plan.
 
 ## 1. Connect Google Drive (rclone)
 
-On any computer with [rclone](https://rclone.org/install/) installed:
+On your computer, with [rclone](https://rclone.org/install/) installed:
 
 ```sh
-rclone config            # n → name: gdrive → storage: drive → scope: 1 (full) → defaults → log in via browser
-rclone lsd gdrive:       # sanity check
-mkdir -p config && cp ~/.config/rclone/rclone.conf config/rclone.conf
+rclone config     # n → name: gdrive → storage: drive → scope: 1 → defaults → log in via browser
+rclone lsd gdrive:
+cat ~/.config/rclone/rclone.conf    # you'll paste this into a secret in step 3
 ```
 
-## 2. (Recommended) Cookies for Instagram
+If you use your own Google OAuth client ID (recommended for reliability), set the Google Cloud app's publishing status to **In production**. In "Testing" mode, refresh tokens expire after 7 days.
 
-Instagram blocks most anonymous downloads. TikTok and X sometimes do the same. Export cookies from a logged-in browser in Netscape format, for example with the "Get cookies.txt LOCALLY" extension. Save them as `config/cookies.txt`. Use a secondary account if you can, because heavy automated use can get an account flagged.
+## 2. (Recommended) Instagram cookies
 
-## 3. Run the server
+Instagram blocks most anonymous downloads, and Cloudflare's IPs are cloud addresses, so expect it to need a login. Export cookies for instagram.com only, in Netscape format, with a browser extension such as "Get cookies.txt LOCALLY". Use a secondary account. Exporting only instagram.com keeps the file small. Worker secrets have a size limit, so don't export every site.
+
+## 3. Deploy
+
+Needs Node.js and Docker running on the machine you deploy from. Wrangler builds the image locally and pushes it to Cloudflare.
 
 ```sh
-cp .env.example .env     # set API_TOKEN to a long random string (e.g. `openssl rand -hex 24`)
-docker compose up -d --build
-curl localhost:8080/healthz
+npm install
+npx wrangler login
+npx wrangler secret put API_TOKEN          # paste a long random string, e.g. `openssl rand -hex 32`
+npx wrangler secret put RCLONE_CONF < ~/.config/rclone/rclone.conf
+npx wrangler secret put COOKIES < cookies.txt   # optional
+npm run deploy
 ```
 
-**Where to host it:** the best option is a machine at home (a Raspberry Pi, NAS or always-on PC) plus [Tailscale](https://tailscale.com) on both the machine and the iPhone. That keeps it private and gives it a residential IP. Instagram and TikTok often block datacenter IPs, so a cheap VPS can work, but expect more failures. If you expose it publicly, put it behind HTTPS, for example with Caddy or a Cloudflare Tunnel.
+The deploy prints your URL, `https://media-saver.<your-subdomain>.workers.dev`. You can also attach a custom domain in the dashboard. The first container rollout can take a few minutes.
 
 Test it:
 
 ```sh
-curl -X POST http://<host>:8080/save -H "Authorization: Bearer $API_TOKEN" \
+curl -X POST https://media-saver.<sub>.workers.dev/save -H "Authorization: Bearer $API_TOKEN" \
      -H "Content-Type: application/json" -d '{"url":"https://x.com/user/status/123"}'
 ```
+
+The first request after the container has been asleep takes a few extra seconds while it starts.
 
 ## 4. iOS Shortcut
 
 Shortcuts app → **+** → name it **Save to Drive**:
 
-1. Tap the **ⓘ** (Details) → enable **Show in Share Sheet**. Set *Share Sheet Types* to **URLs** and **Text**. Some apps share text that has the link in it.
-2. Add the **Receive URLs and Text from Share Sheet** input (added automatically in step 1). Under "If there's no input", choose **Get Clipboard**. That lets you also run it from a copied link.
-3. Add **Get Contents of URL**:
-   - URL: `http://<host>:8080/save` (your Tailscale name/IP or public HTTPS URL)
+1. Tap the **ⓘ** (Details) → enable **Show in Share Sheet**. Set *Share Sheet Types* to **URLs** and **Text**. Under "If there's no input", choose **Get Clipboard**.
+2. Add **Get Contents of URL**:
+   - URL: `https://media-saver.<sub>.workers.dev/save`
    - Method: **POST**
    - Headers: `Authorization` = `Bearer <your API_TOKEN>`
    - Request Body: **JSON**, with key `url` (Text) = **Shortcut Input**
-4. Add **Show Notification** with the body set to **Contents of URL**.
+3. Add **Show Notification** with the body set to **Contents of URL**.
 
-Usage: in TikTok, Instagram or X tap **Share**. Then pick **Save to Drive**. In TikTok and Instagram it may sit under **More…** or in the row of app icons. If you don't see it, use **Copy link** and run the shortcut from the widget or Back Tap. It reads the clipboard.
+Usage: in TikTok, Instagram or X tap **Share**, then pick **Save to Drive**. In TikTok and Instagram it may be under **More…**. If it isn't there, tap **Copy link** and run the shortcut from a widget or Back Tap. It reads the clipboard.
 
-You'll get "Saved N file(s) from tiktok". Long downloads return "Still downloading…" after about 50 s and still finish in the background.
+You'll see "Saved N file(s) from tiktok". Downloads longer than about 50 s reply "Still downloading…" and finish in the background.
 
 ## How it works
 
-- `POST /save` takes JSON `{"url": ...}`, a form field `url`, or plain text. The first link in the body is used, and tracking query params are removed.
-- Instagram tries gallery-dl first, then yt-dlp. TikTok and X try yt-dlp first, then gallery-dl. gallery-dl covers photo posts, carousels and TikTok slideshows.
-- Downloads go to a temp dir, then `rclone move` sends them to Drive. Files are named by post ID, so sharing the same post twice doesn't create duplicates.
-- Only one download runs at a time.
+- `src/index.ts` is the Worker. It rejects requests without the right token, so random traffic never wakes the container. Valid requests go to a single container instance.
+- `main.go` is the server inside the container. It writes `RCLONE_CONF` and `COOKIES` to files at startup. It takes the first link in the request and removes tracking params.
+  - Instagram: gallery-dl first, then yt-dlp.
+  - TikTok and X: yt-dlp first, then gallery-dl.
+  - It downloads to a temp dir, then runs `rclone move` to Drive. Files are named by post ID, so re-sharing a post doesn't duplicate it.
+- Logs: `npx wrangler tail`, or Workers → media-saver → Logs / Containers in the dashboard. Each link is logged as `OK` or `FAIL`.
 
 ## Maintenance
 
-The sites change often, and yt-dlp and gallery-dl ship fixes quickly. When downloads start failing, rebuild to update them:
+yt-dlp and gallery-dl need frequent updates as the sites change. When downloads start failing, run `npm run deploy` again. The image rebuild installs the latest versions. If the image is cached, run `docker builder prune` first.
 
-```sh
-docker compose build --no-cache && docker compose up -d
-docker compose logs -f   # shows OK/FAIL per link
-```
+## Local testing (optional)
+
+`docker compose up --build` runs the same container on `localhost:8080`. It reads `./config/rclone.conf` and `./config/cookies.txt` and `API_TOKEN` from `.env`.

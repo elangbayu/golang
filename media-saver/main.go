@@ -59,6 +59,17 @@ func main() {
 	if cfg.token == "" {
 		log.Fatal("API_TOKEN must be set")
 	}
+	// On Cloudflare Containers there are no volumes, so rclone.conf and cookies.txt
+	// arrive as secret env vars and are written to files at startup.
+	if conf := os.Getenv("RCLONE_CONF"); conf != "" {
+		path := filepath.Join(cfg.workDir, "rclone.conf")
+		mustWrite(path, conf)
+		os.Setenv("RCLONE_CONFIG", path)
+	}
+	if cookies := os.Getenv("COOKIES"); cookies != "" {
+		cfg.cookiesFile = filepath.Join(cfg.workDir, "cookies.txt")
+		mustWrite(cfg.cookiesFile, cookies)
+	}
 
 	var mu sync.Mutex // one download at a time keeps a small box (or a Pi) happy
 	mux := http.NewServeMux()
@@ -247,6 +258,12 @@ func tail(b []byte) string {
 		s = "..." + s[len(s)-400:]
 	}
 	return s
+}
+
+func mustWrite(path, content string) {
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		log.Fatal(err)
+	}
 }
 
 func envOr(k, def string) string {

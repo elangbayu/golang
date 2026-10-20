@@ -1,0 +1,23 @@
+{
+  "name": "media-saver",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-10-01",
+  "observability": { "enabled": true },
+  "vars": {
+    // Drive folder; files go to <folder>/instagram, /tiktok and /x
+    "RCLONE_REMOTE": "gdrive:Social Saves"
+  },
+  // Secrets (set with `npx wrangler secret put <NAME>`): API_TOKEN, RCLONE_CONF, COOKIES (optional)
+  "containers": [
+    {
+      "class_name": "MediaSaver",
+      "image": "./Dockerfile",
+      "instance_type": "basic",
+      "max_instances": 1
+    }
+  ],
+  "durable_objects": {
+    "bindings": [{ "name": "MEDIA_SAVER", "class_name": "MediaSaver" }]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["MediaSaver"] }]
+}
